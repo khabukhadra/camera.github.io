@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scan feasibility check</title>
+<style>
+  :root {
+    --steel-900: #1b1f24;
+    --steel-800: #262c33;
+    --steel-600: #3d454f;
+    --steel-300: #8b95a1;
+    --paper: #eef1f4;
+    --signal: #f0a020;
+    --good: #4caf7d;
+    --bad: #e2574c;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--steel-900);
+    color: var(--paper);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 560px; margin: 0 auto; padding: 16px 16px 48px; }
+  h1 { font-size: 19px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--steel-300); font-size: 14px; margin: 0 0 20px; }
+
+  .env {
+    background: var(--steel-800);
+    border-left: 3px solid var(--steel-600);
+    padding: 12px 14px;
+    margin-bottom: 20px;
+    font-size: 14px;
+  }
+  .env div { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
+  .env span:last-child { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--steel-300); text-align: right; }
+  .env .ok span:last-child { color: var(--good); }
+  .env .no span:last-child { color: var(--bad); }
+
+  .stage {
+    position: relative;
+    background: #000;
+    aspect-ratio: 4 / 3;
+    overflow: hidden;
+    margin-bottom: 4px;
+  }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .reticle {
+    position: absolute; inset: 22% 10%;
+    border: 2px solid rgba(240,160,32,.85);
+    pointer-events: none;
+  }
+  .timer {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 8px 12px;
+    background: linear-gradient(transparent, rgba(0,0,0,.75));
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 30px; font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .timer small { font-size: 14px; font-weight: 400; color: var(--steel-300); margin-left: 6px; }
+
+  .hit {
+    background: var(--steel-800);
+    border-left: 3px solid var(--good);
+    padding: 12px 14px;
+    margin: 12px 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 15px;
+    word-break: break-all;
+  }
+  .hit em { font-style: normal; color: var(--steel-300); font-size: 13px; display: block; margin-top: 4px; }
+
+  button {
+    width: 100%;
+    min-height: 60px;
+    border: 0;
+    background: var(--signal);
+    color: #14181c;
+    font: 600 17px/1 system-ui, sans-serif;
+    margin-top: 10px;
+    cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--paper); border: 1px solid var(--steel-600); }
+  button:disabled { opacity: .4; }
+
+  .tally { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--steel-600); margin: 22px 0 0; }
+  .tally div { background: var(--steel-800); padding: 12px 10px; }
+  .tally b { display: block; font-family: ui-monospace, monospace; font-size: 22px; font-weight: 600; }
+  .tally small { color: var(--steel-300); font-size: 12px; }
+
+  #log {
+    width: 100%; height: 170px; margin-top: 14px;
+    background: var(--steel-800); color: var(--paper);
+    border: 1px solid var(--steel-600); padding: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; line-height: 1.5;
+    resize: vertical;
+  }
+  .note { color: var(--steel-300); font-size: 13px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Scan feasibility check</h1>
+  <p class="sub">Point at a real item label. Record how long each read takes and how many fail.</p>
+
+  <div class="env" id="env"></div>
+
+  <div class="stage">
+    <video id="video" playsinline muted></video>
+    <div class="reticle"></div>
+    <div class="timer" id="timer">—<small>seconds</small></div>
+  </div>
+
+  <div id="hit"></div>
+
+  <button id="start">Start camera</button>
+  <button id="fail" class="ghost" disabled>Couldn't read this one</button>
+
+  <div class="tally">
+    <div><b id="tReads">0</b><small>reads</small></div>
+    <div><b id="tFails">0</b><small>gave up</small></div>
+    <div><b id="tMed">—</b><small>median secs</small></div>
+  </div>
+
+  <textarea id="log" readonly></textarea>
+  <button id="copy" class="ghost">Copy results</button>
+
+  <p class="note">Try each label flat, curled, at an angle, through wrapping, and in the worst light you can find. Twenty attempts is enough to know.</p>
+</main>
+
+<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script>
+const FORMATS = ['code_128','code_39','code_93','codabar','ean_13','ean_8','upc_a','upc_e','itf','data_matrix','qr_code'];
+
+const $ = id => document.getElementById(id);
+const video = $('video');
+
+let detector = null;      // native BarcodeDetector, if present
+let zxing = null;         // fallback reader
+let path = 'none';        // which engine actually ran
+let stream = null;
+let running = false;
+let attemptStart = 0;
+let tickHandle = null;
+const times = [];
+let fails = 0;
+const lines = [];
+
+function log(s) {
+  lines.push(s);
+  $('log').value = lines.join('\n');
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+function median(a) {
+  if (!a.length) return null;
+  const s = [...a].sort((x, y) => x - y);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m-1] + s[m]) / 2;
+}
+
+function row(label, value, state) {
+  const d = document.createElement('div');
+  if (state) d.className = state;
+  d.innerHTML = `<span>${label}</span><span>${value}</span>`;
+  $('env').appendChild(d);
+}
+
+async function probe() {
+  const secure = window.isSecureContext;
+  row('Secure context', secure ? 'yes' : 'NO — camera blocked', secure ? 'ok' : 'no');
+
+  const hasNative = 'BarcodeDetector' in window;
+  let supported = [];
+  if (hasNative) {
+    try { supported = await BarcodeDetector.getSupportedFormats(); } catch (e) {}
+  }
+  const usable = FORMATS.filter(f => supported.includes(f));
+
+  if (hasNative && usable.length) {
+    detector = new BarcodeDetector({ formats: usable });
+    path = 'native';
+    row('Engine', 'native BarcodeDetector', 'ok');
+    row('Formats', usable.join(' '), null);
+  } else if (window.ZXing) {
+    zxing = new ZXing.BrowserMultiFormatReader();
+    path = 'zxing';
+    row('Engine', hasNative ? 'ZXing (native formats unusable)' : 'ZXing fallback', null);
+  } else {
+    row('Engine', 'none available', 'no');
+  }
+
+  row('Device', navigator.userAgent.replace(/^Mozilla\/5\.0 /, '').slice(0, 60), null);
+  log(`# scan check — ${new Date().toISOString()}`);
+  log(`# engine: ${path}`);
+  log(`# ua: ${navigator.userAgent}`);
+  log('');
+}
+
+function newAttempt() {
+  attemptStart = performance.now();
+  $('fail').disabled = false;
+  clearInterval(tickHandle);
+  tickHandle = setInterval(() => {
+    $('timer').innerHTML = ((performance.now() - attemptStart) / 1000).toFixed(1) + '<small>seconds</small>';
+  }, 100);
+}
+
+function record(value, format) {
+  const secs = (performance.now() - attemptStart) / 1000;
+  times.push(secs);
+  clearInterval(tickHandle);
+  $('timer').innerHTML = secs.toFixed(1) + '<small>seconds</small>';
+  $('hit').innerHTML = `<div class="hit">${value}<em>${format} · ${secs.toFixed(1)}s · read ${times.length}</em></div>`;
+  log(`${times.length}\t${secs.toFixed(2)}s\t${format}\t${value}`);
+  $('tReads').textContent = times.length;
+  $('tMed').textContent = median(times).toFixed(1);
+  if (navigator.vibrate) navigator.vibrate(60);
+  setTimeout(newAttempt, 900);   // pause so one label doesn't fire repeatedly
+}
+
+async function nativeLoop() {
+  if (!running) return;
+  try {
+    const hits = await detector.detect(video);
+    if (hits.length) { record(hits[0].rawValue, hits[0].format); }
+  } catch (e) { /* frame not ready */ }
+  setTimeout(nativeLoop, 120);
+}
+
+async function start() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 960 } }
+    });
+  } catch (e) {
+    log(`!! camera refused: ${e.name} — ${e.message}`);
+    return;
+  }
+  video.srcObject = stream;
+  await video.play();
+  running = true;
+  $('start').textContent = 'Running';
+  $('start').disabled = true;
+  newAttempt();
+
+  const track = stream.getVideoTracks()[0];
+  const s = track.getSettings();
+  log(`# camera: ${s.width}x${s.height} ${s.facingMode || ''}`);
+  log('');
+
+  if (path === 'native') {
+    nativeLoop();
+  } else if (path === 'zxing') {
+    zxing.decodeFromStream(stream, video, (result) => {
+      if (result) record(result.getText(), result.getBarcodeFormat());
+    });
+  }
+}
+
+$('start').onclick = start;
+
+$('fail').onclick = () => {
+  const secs = (performance.now() - attemptStart) / 1000;
+  fails++;
+  $('tFails').textContent = fails;
+  log(`—\t${secs.toFixed(2)}s\tGAVE UP`);
+  newAttempt();
+};
+
+$('copy').onclick = async () => {
+  const summary = [
+    '',
+    `reads: ${times.length}  gave up: ${fails}`,
+    `median: ${times.length ? median(times).toFixed(2) + 's' : 'n/a'}`,
+    `slowest: ${times.length ? Math.max(...times).toFixed(2) + 's' : 'n/a'}`,
+    `success rate: ${times.length + fails ? Math.round(100 * times.length / (times.length + fails)) + '%' : 'n/a'}`
+  ].join('\n');
+  $('log').value = lines.join('\n') + summary;
+  try {
+    await navigator.clipboard.writeText($('log').value);
+    $('copy').textContent = 'Copied';
+    setTimeout(() => $('copy').textContent = 'Copy results', 1500);
+  } catch (e) {
+    $('log').select();
+  }
+};
+
+probe();
+</script>
+</body>
+</html>
