@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <title>Barcode scanner</title>
+  <style>
+    :root {
+      --ink: #000000;
+      --paper: #F7F7F5;
+      --amber: #FFB000;
+      --muted: #9A9A94;
+      --danger: #FF6B5E;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--ink);
+      color: var(--paper);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    main {
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+    }
+
+    video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    /* Viewfinder: four amber corners, the one bold element on the page */
+    .frame {
+      position: absolute;
+      left: 50%;
+      top: 42%;
+      width: min(78vw, 360px);
+      aspect-ratio: 1.4;
+      transform: translate(-50%, -50%);
+      box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45);
+      border-radius: 14px;
+      pointer-events: none;
+      transition: aspect-ratio 0.2s;
+    }
+
+    .frame::before {
+      content: "";
+      position: absolute;
+      inset: -3px;
+      border-radius: 16px;
+      border: 4px solid var(--amber);
+      /* keep only the corners of the border */
+      -webkit-mask:
+        linear-gradient(#000 0 0) top left / 36px 36px no-repeat,
+        linear-gradient(#000 0 0) top right / 36px 36px no-repeat,
+        linear-gradient(#000 0 0) bottom left / 36px 36px no-repeat,
+        linear-gradient(#000 0 0) bottom right / 36px 36px no-repeat;
+              mask:
+        linear-gradient(#000 0 0) top left / 36px 36px no-repeat,
+        linear-gradient(#000 0 0) top right / 36px 36px no-repeat,
+        linear-gradient(#000 0 0) bottom left / 36px 36px no-repeat,
+        linear-gradient(#000 0 0) bottom right / 36px 36px no-repeat;
+    }
+
+    main[data-state="found"] .frame::before {
+      border-color: var(--paper);
+    }
+
+    .hint {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: calc(42% + min(28vw, 130px) + 28px);
+      margin: 0;
+      text-align: center;
+      font-size: 0.95rem;
+      color: var(--paper);
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+    }
+
+    /* Bottom sheet for results and errors */
+    .sheet {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding: 22px 20px calc(22px + env(safe-area-inset-bottom));
+      background: var(--paper);
+      color: var(--ink);
+      border-radius: 20px 20px 0 0;
+      transform: translateY(105%);
+      transition: transform 0.25s ease-out;
+    }
+
+    .sheet.open { transform: translateY(0); }
+
+    .sheet p { margin: 0; }
+
+    .format {
+      font-size: 0.85rem;
+      color: #5C5C57;
+      margin-bottom: 6px;
+    }
+
+    .value {
+      font-size: 1.35rem;
+      font-weight: 600;
+      line-height: 1.3;
+      word-break: break-all;
+      max-height: 30vh;
+      overflow-y: auto;
+      margin-bottom: 18px;
+    }
+
+    .message {
+      font-size: 1.05rem;
+      line-height: 1.45;
+      margin-bottom: 18px;
+      max-width: 60ch;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    button, a.button {
+      appearance: none;
+      border: 2px solid var(--ink);
+      background: transparent;
+      color: var(--ink);
+      font: inherit;
+      font-weight: 600;
+      font-size: 1rem;
+      padding: 12px 18px;
+      border-radius: 999px;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    button.primary {
+      background: var(--ink);
+      color: var(--paper);
+    }
+
+    button:focus-visible, a.button:focus-visible {
+      outline: 3px solid var(--amber);
+      outline-offset: 2px;
+    }
+
+    [hidden] { display: none !important; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .sheet, .frame { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <main id="app" data-state="starting">
+    <video id="video" playsinline muted autoplay></video>
+    <div class="frame" aria-hidden="true"></div>
+    <p class="hint" id="hint" role="status">Starting camera…</p>
+
+    <section class="sheet" id="sheet" aria-live="polite">
+      <!-- Result view -->
+      <div id="resultView" hidden>
+        <p class="format" id="resultFormat"></p>
+        <p class="value" id="resultValue"></p>
+        <div class="actions">
+          <button class="primary" id="scanAgainBtn" type="button">Scan again</button>
+          <button id="copyBtn" type="button">Copy</button>
+          <a class="button" id="openLink" target="_blank" rel="noopener" hidden>Open link</a>
+        </div>
+      </div>
+
+      <!-- Error view -->
+      <div id="errorView" hidden>
+        <p class="message" id="errorMessage"></p>
+        <div class="actions">
+          <button class="primary" id="retryBtn" type="button">Try again</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module">
+    // Formats we want to read. Anything the device can't handle is dropped.
+    const WANTED_FORMATS = [
+      "qr_code", "ean_13", "ean_8", "upc_a", "upc_e",
+      "code_128", "code_39", "code_93", "codabar", "itf",
+      "data_matrix", "pdf417", "aztec"
+    ];
+
+    // Fallback for Safari/Firefox/devices without a native detector (ZXing compiled to WASM).
+    const POLYFILL_URL =
+      "https://fastly.jsdelivr.net/npm/barcode-detector@3/dist/es/ponyfill.min.js";
+
+    const SCAN_INTERVAL_MS = 150;
+
+    const app = document.getElementById("app");
+    const video = document.getElementById("video");
+    const hint = document.getElementById("hint");
+    const sheet = document.getElementById("sheet");
+    const resultView = document.getElementById("resultView");
+    const resultFormat = document.getElementById("resultFormat");
+    const resultValue = document.getElementById("resultValue");
+    const openLink = document.getElementById("openLink");
+    const copyBtn = document.getElementById("copyBtn");
+    const scanAgainBtn = document.getElementById("scanAgainBtn");
+    const errorView = document.getElementById("errorView");
+    const errorMessage = document.getElementById("errorMessage");
+    const retryBtn = document.getElementById("retryBtn");
+
+    let detector = null;
+    let stream = null;
+    let scanning = false;
+    let scanTimer = null;
+
+    // ---------- Detector setup ----------
+
+    async function createDetector() {
+      if ("BarcodeDetector" in window) {
+        try {
+          const supported = await window.BarcodeDetector.getSupportedFormats();
+          const formats = WANTED_FORMATS.filter(f => supported.includes(f));
+          if (formats.length > 0) {
+            return new window.BarcodeDetector({ formats });
+          }
+        } catch {
+          // Fall through to the polyfill.
+        }
+      }
+
+      const { BarcodeDetector } = await import(POLYFILL_URL);
+      return new BarcodeDetector({ formats: WANTED_FORMATS });
+    }
+
+    // ---------- Camera ----------
+
+    async function startCamera() {
+      stopCamera();
+
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      });
+
+      video.srcObject = stream;
+      await video.play();
+    }
+
+    function stopCamera() {
+      stopScanning();
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+      video.srcObject = null;
+    }
+
+    // ---------- Scan loop ----------
+
+    function startScanning() {
+      scanning = true;
+      app.dataset.state = "scanning";
+      hint.textContent = "Point the camera at a barcode";
+      scheduleNextScan();
+    }
+
+    function stopScanning() {
+      scanning = false;
+      clearTimeout(scanTimer);
+    }
+
+    function scheduleNextScan() {
+      if (!scanning) return;
+      scanTimer = setTimeout(scanFrame, SCAN_INTERVAL_MS);
+    }
+
+    async function scanFrame() {
+      if (!scanning) return;
+
+      // Wait until the video actually has frames.
+      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        scheduleNextScan();
+        return;
+      }
+
+      try {
+        const codes = await detector.detect(video);
+        if (scanning && codes.length > 0) {
+          handleResult(codes[0]);
+          return;
+        }
+      } catch (err) {
+        console.warn("detect() failed on this frame:", err);
+      }
+
+      scheduleNextScan();
+    }
+
+    function handleResult(code) {
+      stopScanning();
+      app.dataset.state = "found";
+      hint.textContent = "Code found";
+
+      if (navigator.vibrate) navigator.vibrate(60);
+
+      resultFormat.textContent = formatLabel(code.format);
+      resultValue.textContent = code.rawValue;
+
+      const url = asHttpUrl(code.rawValue);
+      openLink.hidden = !url;
+      if (url) openLink.href = url;
+
+      copyBtn.textContent = "Copy";
+      showSheet(resultView);
+    }
+
+    // ---------- UI helpers ----------
+
+    function showSheet(view) {
+      resultView.hidden = view !== resultView;
+      errorView.hidden = view !== errorView;
+      sheet.classList.add("open");
+      view.querySelector("button")?.focus({ preventScroll: true });
+    }
+
+    function hideSheet() {
+      sheet.classList.remove("open");
+    }
+
+    function showError(message) {
+      stopCamera();
+      app.dataset.state = "error";
+      hint.textContent = "";
+      errorMessage.textContent = message;
+      showSheet(errorView);
+    }
+
+    function formatLabel(format) {
+      const names = {
+        qr_code: "QR code", ean_13: "EAN-13", ean_8: "EAN-8",
+        upc_a: "UPC-A", upc_e: "UPC-E", code_128: "Code 128",
+        code_39: "Code 39", code_93: "Code 93", codabar: "Codabar",
+        itf: "ITF", data_matrix: "Data Matrix", pdf417: "PDF417", aztec: "Aztec"
+      };
+      return names[format] ?? format;
+    }
+
+    function asHttpUrl(text) {
+      try {
+        const url = new URL(text);
+        return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function describeCameraError(err) {
+      switch (err?.name) {
+        case "NotAllowedError":
+          return "Camera access is blocked. Allow the camera for this site in your browser's site settings, then tap Try again.";
+        case "NotFoundError":
+        case "OverconstrainedError":
+          return "No camera was found on this device.";
+        case "NotReadableError":
+          return "The camera is being used by another app. Close that app, then tap Try again.";
+        default:
+          return `The camera couldn't start (${err?.name ?? "unknown error"}). Tap Try again.`;
+      }
+    }
+
+    // ---------- Startup ----------
+
+    async function boot() {
+      hideSheet();
+      app.dataset.state = "starting";
+      hint.textContent = "Starting camera…";
+
+      if (!window.isSecureContext) {
+        showError("The camera only works over HTTPS. Open this page from its https:// address.");
+        return;
+      }
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        showError("This browser can't access the camera. Try Chrome or Safari.");
+        return;
+      }
+
+      try {
+        detector ??= await createDetector();
+      } catch (err) {
+        console.error(err);
+        showError("The barcode reader couldn't load. Check your connection, then tap Try again.");
+        return;
+      }
+
+      try {
+        await startCamera();
+      } catch (err) {
+        console.error(err);
+        showError(describeCameraError(err));
+        return;
+      }
+
+      startScanning();
+    }
+
+    scanAgainBtn.addEventListener("click", () => {
+      hideSheet();
+      startScanning();
+    });
+
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(resultValue.textContent);
+        copyBtn.textContent = "Copied";
+      } catch {
+        copyBtn.textContent = "Copy failed";
+      }
+    });
+
+    retryBtn.addEventListener("click", boot);
+
+    // Release the camera when the tab is hidden, pick it back up when it returns.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        stopCamera();
+      } else if (app.dataset.state === "scanning") {
+        boot();
+      } else if (app.dataset.state === "found") {
+        startCamera().catch(err => showError(describeCameraError(err)));
+      }
+    });
+
+    boot();
+  </script>
+</body>
+</html>
